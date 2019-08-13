@@ -1,17 +1,20 @@
 import json
 import random
 import string
-
 from datetime import datetime
 
+import pytz
 from django.db import models
 from django.utils import timezone
+from django.utils.timezone import localtime
+from django_extensions.db.fields.json import JSONField
 
-from config.constants import ALL_DATA_STREAMS, CHUNKABLE_FILES, CHUNK_TIMESLICE_QUANTUM, PIPELINE_FOLDER
-from database.validators import LengthValidator
-from libs.security import chunk_hash, low_memory_chunk_hash
+from config.constants import (ALL_DATA_STREAMS, CHUNK_TIMESLICE_QUANTUM, CHUNKABLE_FILES,
+    PIPELINE_FOLDER)
 from database.models import AbstractModel
 from database.study_models import Study
+from database.validators import LengthValidator
+from libs.security import chunk_hash, low_memory_chunk_hash
 
 
 class FileProcessingLockedError(Exception): pass
@@ -19,23 +22,49 @@ class UnchunkableDataTypeError(Exception): pass
 class ChunkableDataTypeError(Exception): pass
 
 
-class ChunkRegistry(AbstractModel):
 
-    DATA_TYPE_CHOICES = tuple([(stream_name, stream_name) for stream_name in ALL_DATA_STREAMS])
+class PipelineRegistry(AbstractModel):
+    study = models.ForeignKey('Study', on_delete=models.PROTECT, related_name='pipeline_registries', db_index=True)
+    participant = models.ForeignKey('Participant', on_delete=models.PROTECT, related_name='pipeline_registries', db_index=True)
+
+    data_type = models.CharField(max_length=256, db_index=True)
+    processed_data = JSONField(null=True, blank=True)
+
+    uploaded_at = models.DateTimeField(db_index=True)
+
+    @classmethod
+    def register_pipeline_data(cls, study, participant_id, data, data_type):
+        cls.objects.create(
+            study=study,
+            participant_id=participant_id,
+            processed_data=data,
+            data_type=data_type,
+            uploaded_at=datetime.utcnow(),
+        )
+
+
+class ChunkRegistry(AbstractModel):
+    # this is declared in the abstract model but needs to be indexed for pipeline queries.
+    last_updated = models.DateTimeField(auto_now=True, db_index=True)
 
     is_chunkable = models.BooleanField()
     chunk_path = models.CharField(max_length=256, db_index=True)  # , unique=True)
     chunk_hash = models.CharField(max_length=25, blank=True)
 
-    data_type = models.CharField(max_length=32, choices=DATA_TYPE_CHOICES, db_index=True)
+    # removed: data_type used to have choices of ALL_DATA_STREAMS, but this generated migrations
+    # unnecessarily, so it has been removed.  This has no side effects.
+    data_type = models.CharField(max_length=32, db_index=True)
     time_bin = models.DateTimeField(db_index=True)
 
     study = models.ForeignKey('Study', on_delete=models.PROTECT, related_name='chunk_registries', db_index=True)
     participant = models.ForeignKey('Participant', on_delete=models.PROTECT, related_name='chunk_registries', db_index=True)
     survey = models.ForeignKey('Survey', blank=True, null=True, on_delete=models.PROTECT, related_name='chunk_registries', db_index=True)
-    
+
+    file_size = models.IntegerField(null=True, default=None)
+
     @classmethod
-    def register_chunked_data(cls, data_type, time_bin, chunk_path, file_contents, study_id, participant_id, survey_id=None):
+    def register_chunked_data(cls, data_type, time_bin, chunk_path, file_contents, study_id,
+                              participant_id, survey_id=None):
         
         if data_type not in CHUNKABLE_FILES:
             raise UnchunkableDataTypeError
@@ -63,10 +92,12 @@ class ChunkRegistry(AbstractModel):
             study_id=study_id,
             participant_id=participant_id,
             survey_id=survey_id,
+            file_size=len(file_contents),
         )
     
     @classmethod
-    def register_unchunked_data(cls, data_type, unix_timestamp, chunk_path, study_id, participant_id, survey_id=None):
+    def register_unchunked_data(cls, data_type, unix_timestamp, chunk_path, study_id, participant_id,
+                                file_contents, survey_id=None):
         # see comment in register_chunked_data above
         time_bin = timezone.make_aware(datetime.utcfromtimestamp(unix_timestamp), timezone.utc)
         
@@ -82,6 +113,7 @@ class ChunkRegistry(AbstractModel):
             study_id=study_id,
             participant_id=participant_id,
             survey_id=survey_id,
+            file_size=len(file_contents),
         )
 
     @classmethod
@@ -110,6 +142,16 @@ class ChunkRegistry(AbstractModel):
     def low_memory_update_chunk_hash(self, list_data_to_hash):
         self.chunk_hash = low_memory_chunk_hash(list_data_to_hash)
         self.save()
+
+    @classmethod
+    def get_updated_users_for_study(cls, study, date_of_last_activity):
+        """ Returns a list of patient ids that have had new or updated ChunkRegistry data
+        since the datetime provided. """
+        # note that date of last activity is actually date of last data processing operation on the
+        # data uploaded by a user.
+        return cls.objects.filter(
+            study=study, last_updated__gte=date_of_last_activity
+        ).values_list("participant__patient_id", flat=True).distinct()
 
 
 class FileToProcess(AbstractModel):
