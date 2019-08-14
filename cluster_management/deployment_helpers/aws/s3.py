@@ -11,7 +11,24 @@ def s3_create_bucket(bucket_name):
         kwargs = {'CreateBucketConfiguration': {'LocationConstraint': GLOBAL_CONFIGURATION["AWS_REGION"]}}
     s3_client = create_s3_client()
     s3_client.create_bucket(ACL='private', Bucket=bucket_name, **kwargs)
-    
+
+def block_public_access(bucket_name):
+    '''
+    Block all public access to the S3 bucket containing sensitive data.
+    '''
+
+    s3_client = create_s3_client()
+
+    s3_client.put_public_access_block(
+        Bucket=bucket_name,
+        PublicAccessBlockConfiguration={
+            'RestrictPublicBuckets': True,
+            'BlockPublicAcls': True,
+            'IgnorePublicAcls': True,
+            'BlockPublicPolicy': True
+        }
+    )
+
 def check_bucket_name_available(bucket_name):
     s3_resource = create_s3_resource()
     return s3_resource.Bucket(bucket_name) not in s3_resource.buckets.all()
@@ -25,5 +42,6 @@ def create_data_bucket(eb_environment_name):
         log.info("checking availability of bucket name '%s'" % name)
         if check_bucket_name_available(name):
             s3_create_bucket(name)
+            block_public_access(name)
             return name
     raise Exception("Was not able to construct a bucket name that is not in use.")
