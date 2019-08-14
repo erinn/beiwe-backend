@@ -1,7 +1,8 @@
+from __future__ import print_function
+
 from multiprocessing.pool import ThreadPool
 from zipfile import ZipFile, ZIP_STORED
 
-from boto.utils import JSONDecodeError
 from datetime import datetime
 from flask import Blueprint, request, abort, json, Response
 
@@ -10,13 +11,14 @@ from config import load_django
 from config.constants import (API_TIME_FORMAT, VOICE_RECORDING, ALL_DATA_STREAMS,
     SURVEY_ANSWERS, SURVEY_TIMINGS, IMAGE_FILE)
 from database.models import is_object_id
-from database.data_access_models import ChunkRegistry
+from database.data_access_models import ChunkRegistry, PipelineRegistry
 from database.study_models import Study
 from database.user_models import Participant, Researcher
 from libs.s3 import s3_retrieve, s3_upload
 from libs.streaming_bytes_io import StreamingBytesIO
 
-from database.data_access_models import PipelineUpload, InvalidUploadParameterError, PipelineUploadTags
+from database.data_access_models import PipelineUpload, InvalidUploadParameterError, \
+    PipelineUploadTags
 
 # Data Notes
 # The call log has the timestamp column as the 3rd column instead of the first.
@@ -37,8 +39,18 @@ def get_and_validate_study_id(chunked_download=False):
     """
     study = _get_study_or_abort_404(request.values.get('study_id', None),
                                     request.values.get('study_pk', None))
-    if not study.is_test and chunked_download:
+
+    try:
+        # FIXME: this is an unsafe solution to identifying the exception to the raw data access rule
+        # for the batch user tasks. Update the researcher model to have a special flag.
+        r = Researcher.objects.get(access_key_id=request.values["access_key"])
+        override_for_batch = r.username.startswith("BATCH USER")
+    except Researcher.DoesNotExist:
+        override_for_batch = False
+        
+    if not override_for_batch and not study.is_test and chunked_download:
         # You're only allowed to download chunked data from test studies
+        print("study '%s' does not allow raw data download." % study.name)
         return abort(404)
     else:
         return study
@@ -54,6 +66,7 @@ def _get_study_or_abort_404(study_object_id, study_pk):
         try:
             study = Study.objects.get(object_id=study_object_id)
         except Study.DoesNotExist:
+            print("study '%s' does not exist." % study_object_id)
             return abort(404)
         else:
             return study
@@ -62,6 +75,7 @@ def _get_study_or_abort_404(study_object_id, study_pk):
         try:
             study = Study.objects.get(pk=study_pk)
         except Study.DoesNotExist:
+            print("study '%s' does not exist." % study_pk)
             return abort(404)
         else:
             return study
@@ -126,11 +140,13 @@ def get_users_in_study():
     study_object_id = request.values.get("study_id", "")
     # if not is_object_id(study_object_id):
     if not is_object_id(study_object_id):
+        print("provided object id '%s' is not an object id" % study_object_id)
         return abort(404)
     
     try:
         study = Study.objects.get(object_id=study_object_id)
     except Study.DoesNotExist:
+        print("study '%s' does not exist" % study_object_id)
         return abort(404)
     
     get_and_validate_researcher(study)
@@ -339,11 +355,12 @@ def determine_data_streams_for_db_query(query):
         # the CLI script and the download page.
         try:
             query['data_types'] = json.loads(request.values['data_streams'])
-        except JSONDecodeError:
+        except ValueError:
             query['data_types'] = request.form.getlist('data_streams')
         
         for data_stream in query['data_types']:
             if data_stream not in ALL_DATA_STREAMS:
+                print("data stream '%s' is invalid" % data_stream)
                 return abort(404)
 
 
@@ -355,11 +372,12 @@ def determine_users_for_db_query(query):
     if 'user_ids' in request.values:
         try:
             query['user_ids'] = [user for user in json.loads(request.values['user_ids'])]
-        except JSONDecodeError:
+        except ValueError:
             query['user_ids'] = request.form.getlist('user_ids')
         
         # Ensure that all user IDs are patient_ids of actual Participants
         if not Participant.objects.filter(patient_id__in=query['user_ids']).count() == len(query['user_ids']):
+            print("invalid user ids: %s" % query['user_ids'])
             return abort(404)
 
 
@@ -427,7 +445,7 @@ def data_pipeline_upload():
         return abort(403) # access key DNE
     researcher = Researcher.objects.get(access_key_id=access_key)
     if not researcher.validate_access_credentials(access_secret):
-        return abort( 403 )  # incorrect secret key
+        return abort(403)  # incorrect secret key
     # case: invalid study
     study_id = request.values["study_id"]
 
@@ -470,17 +488,67 @@ def data_pipeline_upload():
     return Response("SUCCESS", status=200)
 
 
+@data_access_api.route("/pipeline-json-upload/v1", methods=['POST'])
+def json_pipeline_upload():
+    access_key = request.values["access_key"]
+    access_secret = request.values["secret_key"]
+
+    if not Researcher.objects.filter(access_key_id=access_key).exists():
+        return abort(403)  # access key DNE
+    researcher = Researcher.objects.get(access_key_id=access_key)
+    if not researcher.validate_access_credentials(access_secret):
+        return abort(403)  # incorrect secret key
+
+    # case: invalid study
+    study_id = request.values["study_id"]
+    if not Study.objects.filter(object_id=study_id).exists():
+        return abort(404)
+
+    study_obj = Study.objects.get(object_id=study_id)
+    # case: study not authorized for user
+    if not study_obj.get_researchers().filter(id=researcher.id).exists():
+        return abort(403)
+
+    json_data = request.values.get("summary_output", None)
+    file_name = request.values.get("file_name", None)
+    patient_id = request.values.get("patient_id", None)
+    participant_id = Participant.objects.get(patient_id=patient_id).id
+
+    if json_data is None:
+        raise Exception("json_data")
+    if file_name is None:
+        raise Exception("summary_type")
+    if patient_id is None:
+        raise Exception("patient_id")
+    if participant_id is None:
+        raise Exception("participant_id")
+
+    if "gps_summaries" in file_name:
+        summary_type = "gps_summary"
+    elif "powerstate_summary" in file_name:
+        summary_type = "powerstate_summary"
+    elif "text_summary" in file_name:
+        summary_type = "text_summary"
+    elif "call_summary" in file_name:
+        summary_type = "call_summary"
+    else:
+        summary_type = file_name
+
+    PipelineRegistry.register_pipeline_data(study_obj, participant_id, json_data, summary_type)
+    return Response("SUCCESS", status=200)
+
+
 @data_access_api.route("/get-pipeline/v1", methods=["GET", "POST"])
 def pipeline_data_download():
     study_obj = get_and_validate_study_id(chunked_download=False)
     get_and_validate_researcher(study_obj)
-    
+
     # the following two cases are for difference in content wrapping between the CLI script and
     # the download page.
     if 'tags' in request.values:
         try:
             tags = json.loads(request.values['tags'])
-        except JSONDecodeError:
+        except ValueError:
             tags = request.form.getlist('tags')
 
         query = PipelineUpload.objects.filter(study__id=study_obj.id, tags__tag__in=tags)

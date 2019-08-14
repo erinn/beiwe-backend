@@ -12,6 +12,22 @@ def s3_create_bucket(bucket_name):
     s3_client = create_s3_client()
     s3_client.create_bucket(ACL='private', Bucket=bucket_name, **kwargs)
 
+def block_public_access(bucket_name):
+    '''
+    Block all public access to the S3 bucket containing sensitive data.
+    '''
+    s3_client = create_s3_client()
+
+    s3_client.put_public_access_block(
+        Bucket=bucket_name,
+        PublicAccessBlockConfiguration={
+            'RestrictPublicBuckets': True,
+            'BlockPublicAcls': True,
+            'IgnorePublicAcls': True,
+            'BlockPublicPolicy': True
+        }
+    )
+
 def s3_encrypt_bucket(bucket_name):
     '''
     Set the policy for the given bucket to enable encryption of data at rest.
@@ -28,7 +44,7 @@ def s3_encrypt_bucket(bucket_name):
                                             },
                                         ]
                                     })
-                                    
+
 def s3_require_tls(bucket_name):
     '''
     This enforces encryption of data in transit for any calls.
@@ -73,5 +89,6 @@ def create_data_bucket(eb_environment_name):
             s3_create_bucket(name)
             s3_encrypt_bucket(name)
             s3_require_tls(name)
+            block_public_access(name)
             return name
     raise Exception("Was not able to construct a bucket name that is not in use.")

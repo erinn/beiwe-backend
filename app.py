@@ -1,6 +1,7 @@
 import os
 
 import jinja2
+from datetime import datetime
 from flask import Flask, render_template, redirect
 from raven.contrib.flask import Sentry
 from werkzeug.contrib.fixers import ProxyFix
@@ -8,7 +9,7 @@ from werkzeug.contrib.fixers import ProxyFix
 from config import load_django
 
 from api import (participant_administration, admin_api, copy_study_api, data_access_api,
-    data_pipeline_api, mobile_api, survey_api)
+    data_pipeline_api, mobile_api, survey_api, dashboard_api)
 from config.settings import SENTRY_ELASTIC_BEANSTALK_DSN, SENTRY_JAVASCRIPT_DSN
 from libs.admin_authentication import is_logged_in
 from libs.security import set_secret_key
@@ -37,6 +38,7 @@ def subdomain(directory):
 
 # Register pages here
 app = subdomain("frontend")
+app.jinja_env.globals['current_year'] = datetime.now().strftime('%Y')
 app.register_blueprint(mobile_api.mobile_api)
 app.register_blueprint(admin_pages.admin_pages)
 app.register_blueprint(mobile_pages.mobile_pages)
@@ -49,6 +51,8 @@ app.register_blueprint(data_access_api.data_access_api)
 app.register_blueprint(data_access_web_form.data_access_web_form)
 app.register_blueprint(copy_study_api.copy_study_api)
 app.register_blueprint(data_pipeline_api.data_pipeline_api)
+app.register_blueprint(dashboard_api.dashboard_api)
+
 
 # Don't set up Sentry for local development
 if os.environ['DJANGO_DB_ENV'] != 'local':
@@ -80,4 +84,3 @@ if __name__ == '__main__':
     # http_server = WSGIServer(('', 8080), app)
     # http_server.serve_forever()
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", "8080")), debug=True)
-
