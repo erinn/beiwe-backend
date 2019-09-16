@@ -13,7 +13,7 @@ from config.constants import (API_TIME_FORMAT, VOICE_RECORDING, ALL_DATA_STREAMS
 from database.models import is_object_id
 from database.data_access_models import ChunkRegistry, PipelineRegistry
 from database.study_models import Study
-from database.user_models import Participant, Researcher
+from database.user_models import Participant, Researcher, StudyRelation
 from libs.s3 import s3_retrieve, s3_upload
 from libs.streaming_bytes_io import StreamingBytesIO
 
@@ -98,7 +98,7 @@ def get_and_validate_researcher(study):
     except Researcher.DoesNotExist:
         return abort(403)  # access key DNE
     
-    if not researcher.studies.filter(pk=study.pk).exists():
+    if not StudyRelation.objects.filter(study_id=study.pk, researcher=researcher).exists():
         return abort(403)  # researcher is not credentialed for this study
     
     if not researcher.validate_access_credentials(access_secret):
@@ -130,8 +130,10 @@ def get_studies():
     
     if not researcher.validate_access_credentials(access_secret):
         return abort(403)  # incorrect secret key
-    
-    return json.dumps(dict(researcher.studies.values_list('object_id', 'name')))
+
+    return json.dumps(
+        dict(StudyRelation.objects.filter(researcher=researcher).values_list("study__object_id", "study__name"))
+    )
 
 
 @data_access_api.route("/get-users/v1", methods=['POST', "GET"])
@@ -171,7 +173,7 @@ def get_data():
     
     study = get_and_validate_study_id(chunked_download=True)
     get_and_validate_researcher(study)
-    
+
     query = {}
     determine_data_streams_for_db_query(query)  # select data streams
     determine_users_for_db_query(query)  # select users
