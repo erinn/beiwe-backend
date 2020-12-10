@@ -8,7 +8,7 @@ pycrypto==2.6.1
 
 # error reporting
 raven[flask]==6.8.0
-cronutils>=0.2.1
+cronutils==0.2.3
 
 # data processing
 celery==4.1.1

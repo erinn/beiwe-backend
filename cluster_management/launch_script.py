@@ -111,7 +111,7 @@ def load_git_repo():
     # Git clone the repository into the remote beiwe-backend folder
     # Note that here stderr is redirected to the log file, because git clone prints
     # to stderr rather than stdout.
-    run('cd {home}; git clone https://github.com/onnela-lab/beiwe-backend.git 2>> {log}'
+    run('cd {home}; git clone https://github.com/erinn/beiwe-backend.git 2>> {log}'
         .format(home=REMOTE_HOME_DIR, log=LOG_FILE))
     
     # Make sure the code is on the right branch
